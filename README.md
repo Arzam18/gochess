@@ -380,3 +380,14 @@ go test -short
 # Run benchmarks
 go test -bench .
 ```
+
+## License
+
+**GPL-3.0-or-later** — see [LICENSE](LICENSE).
+
+Dependency audit (July 2026): GoChess has no GPL dependencies — its only Go
+dependency is `golang.org/x/sys` (BSD-3-Clause), and the vendored Syzygy
+probing code under `syzygy/` is [Fathom](https://github.com/jdart1/Fathom)
+(MIT; notices retained in-file). It is licensed GPL by choice, to match its
+successor [Coda](https://github.com/adamtwiss/coda) and the open engine
+ecosystem whose published work informed it.
