@@ -1,6 +1,8 @@
 package chess
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,10 +67,14 @@ func readNetTxt(path string) (string, error) {
 // LoadNNUEFromNetTxt resolves and loads the NNUE net specified by net.txt.
 // It searches for the file in: (1) executable directory, (2) CWD.
 // Returns the loaded net (v4 or v5), the path it was loaded from, and any error.
-// If the net file is not found, returns a descriptive error.
+// If no external network file is found, embedded Android builds fall back to
+// their compiled-in production network; non-embedded builds return a descriptive error.
 func LoadNNUEFromNetTxt() (nnueNet *NNUENet, nnueNetV5 *NNUENetV5, loadedPath string, err error) {
 	filename, err := NetTxtFilename()
 	if err != nil {
+		if len(embeddedNNUE) != 0 {
+			return loadEmbeddedNNUE()
+		}
 		return nil, nil, "", fmt.Errorf("cannot determine net filename: %w", err)
 	}
 
@@ -107,5 +113,37 @@ func LoadNNUEFromNetTxt() (nnueNet *NNUENet, nnueNetV5 *NNUENetV5, loadedPath st
 		return net, nil, path, nil
 	}
 
+	if len(embeddedNNUE) != 0 {
+		return loadEmbeddedNNUE()
+	}
 	return nil, nil, "", fmt.Errorf("NNUE net '%s' not found. Run './chess fetch-net' to download it", filename)
+}
+
+// loadEmbeddedNNUE parses the network compiled into Android ARM64 builds.
+// External network files remain higher priority when present, so developers
+// can still override the embedded production model for testing.
+func loadEmbeddedNNUE() (nnueNet *NNUENet, nnueNetV5 *NNUENetV5, loadedPath string, err error) {
+	if len(embeddedNNUE) < 8 {
+		return nil, nil, "", fmt.Errorf("embedded NNUE is missing or truncated")
+	}
+	magic := binary.LittleEndian.Uint32(embeddedNNUE[0:4])
+	if magic != nnueMagic {
+		return nil, nil, "", fmt.Errorf("embedded NNUE has invalid magic: 0x%X", magic)
+	}
+	version := binary.LittleEndian.Uint32(embeddedNNUE[4:8])
+	loadedPath = "embedded:" + embeddedNNUEFilename
+	if version == 5 || version == 6 || version == 7 {
+		net, loadErr := LoadNNUEV5FromBytes(embeddedNNUE)
+		if loadErr != nil {
+			return nil, nil, "", fmt.Errorf("loading embedded NNUE v%d: %w", version, loadErr)
+		}
+		return nil, net, loadedPath, nil
+	}
+
+	net, loadErr := readNNUEVersioned(bytes.NewReader(embeddedNNUE), true)
+	if loadErr != nil {
+		return nil, nil, "", fmt.Errorf("loading embedded NNUE v%d: %w", version, loadErr)
+	}
+	net.PrepareWeights()
+	return net, nil, loadedPath, nil
 }

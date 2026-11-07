@@ -12,6 +12,7 @@ package chess
 // Output = sum(crelu(acc) * outputWeight) / QA + outputBias, then / QB.
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -23,8 +24,8 @@ const (
 	NNUEv5DefaultHidden = 1024 // default if not detected
 
 	// V5 quantization scale factors
-	nnueV5InputScale  = 255 // CReLU clips to [0, 255] — Bullet standard for CReLU/SCReLU
-	nnueV5OutputScale = 64  // output weight scale
+	nnueV5InputScale  = 255                                  // CReLU clips to [0, 255] — Bullet standard for CReLU/SCReLU
+	nnueV5OutputScale = 64                                   // output weight scale
 	nnueV5BiasScale   = nnueV5InputScale * nnueV5OutputScale // 16320
 
 	// V5 CReLU bounds
@@ -64,9 +65,9 @@ type NNUENetV5 struct {
 
 	// Float32 versions of L2 and output weights (dequantized at load time).
 	// Used for hidden layer forward pass — eliminates integer truncation errors.
-	L2WeightsF []float32 // [L1Size * L2Size] — L2Weights / QA
-	L2BiasesF  []float32 // [L2Size] — L2Biases / QA
-	OutWeightsF []float32 // [buckets * outWidth] — OutputWeights / QB
+	L2WeightsF  []float32                  // [L1Size * L2Size] — L2Weights / QA
+	L2BiasesF   []float32                  // [L2Size] — L2Biases / QA
+	OutWeightsF []float32                  // [buckets * outWidth] — OutputWeights / QB
 	OutBiasF    [NNUEOutputBuckets]float32 // OutputBias / (QA * QB)
 
 	// Output layer: [bucket * outWidth] where outWidth = L2Size or L1Size or 2*HiddenSize
@@ -102,8 +103,9 @@ func (net *NNUENetV5) outputWeightRow(bucket int) []int16 {
 
 // prepareL1Weights transposes L1 weights for SIMD matmul.
 // Produces two separate transposed arrays for STM and NTM perspectives:
-//   L1WeightsT[0 .. L1*H-1]     = STM weights: L1WeightsT[i*H + j] = L1Weights[j*L1 + i]
-//   L1WeightsT[L1*H .. 2*L1*H-1] = NTM weights: L1WeightsT[L1*H + i*H + j] = L1Weights[(H+j)*L1 + i]
+//
+//	L1WeightsT[0 .. L1*H-1]     = STM weights: L1WeightsT[i*H + j] = L1Weights[j*L1 + i]
+//	L1WeightsT[L1*H .. 2*L1*H-1] = NTM weights: L1WeightsT[L1*H + i*H + j] = L1Weights[(H+j)*L1 + i]
 func (net *NNUENetV5) prepareL1Weights() {
 	if net.L1Size == 0 {
 		return
@@ -204,9 +206,9 @@ type NNUEAccumulatorV5 struct {
 // FinnyEntryV5 caches an accumulator and the board state that produced it.
 // Used to avoid full recomputes on king bucket changes.
 type FinnyEntryV5 struct {
-	Acc     []int16      // cached accumulator values (len = hiddenSize)
-	Pieces  [13]Bitboard // piece occupancy when this entry was last written
-	Valid   bool         // whether this entry has been populated
+	Acc    []int16      // cached accumulator values (len = hiddenSize)
+	Pieces [13]Bitboard // piece occupancy when this entry was last written
+	Valid  bool         // whether this entry has been populated
 }
 
 // NNUEAccumulatorStackV5 provides push/pop for MakeMove/UnmakeMove.
@@ -505,20 +507,36 @@ func (net *NNUENetV5) Forward(acc *NNUEAccumulatorV5, stm Color, pieceCount int)
 		for i := 0; i < PW; i++ {
 			a := int32(stmAcc[i])
 			b := int32(stmAcc[i+PW])
-			if a < 0 { a = 0 }
-			if a > nnueV5ClipMax { a = nnueV5ClipMax }
-			if b < 0 { b = 0 }
-			if b > nnueV5ClipMax { b = nnueV5ClipMax }
-			output += int64((a * b) / nnueV5InputScale) * int64(outW[i])
+			if a < 0 {
+				a = 0
+			}
+			if a > nnueV5ClipMax {
+				a = nnueV5ClipMax
+			}
+			if b < 0 {
+				b = 0
+			}
+			if b > nnueV5ClipMax {
+				b = nnueV5ClipMax
+			}
+			output += int64((a*b)/nnueV5InputScale) * int64(outW[i])
 		}
 		for i := 0; i < PW; i++ {
 			a := int32(ntmAcc[i])
 			b := int32(ntmAcc[i+PW])
-			if a < 0 { a = 0 }
-			if a > nnueV5ClipMax { a = nnueV5ClipMax }
-			if b < 0 { b = 0 }
-			if b > nnueV5ClipMax { b = nnueV5ClipMax }
-			output += int64((a * b) / nnueV5InputScale) * int64(outW[PW+i])
+			if a < 0 {
+				a = 0
+			}
+			if a > nnueV5ClipMax {
+				a = nnueV5ClipMax
+			}
+			if b < 0 {
+				b = 0
+			}
+			if b > nnueV5ClipMax {
+				b = nnueV5ClipMax
+			}
+			output += int64((a*b)/nnueV5InputScale) * int64(outW[PW+i])
 		}
 	} else if net.UseSCReLU && nnueUseSIMDV5 {
 		sum := nnueV5SCReLUDotN(&stmAcc[0], &outW[0], H)
@@ -528,14 +546,22 @@ func (net *NNUENetV5) Forward(acc *NNUEAccumulatorV5, stm Color, pieceCount int)
 		var sum int64
 		for i := 0; i < H; i++ {
 			v := int32(stmAcc[i])
-			if v < 0 { v = 0 }
-			if v > nnueV5ClipMax { v = nnueV5ClipMax }
+			if v < 0 {
+				v = 0
+			}
+			if v > nnueV5ClipMax {
+				v = nnueV5ClipMax
+			}
 			sum += int64(v*v) * int64(outW[i])
 		}
 		for i := 0; i < H; i++ {
 			v := int32(ntmAcc[i])
-			if v < 0 { v = 0 }
-			if v > nnueV5ClipMax { v = nnueV5ClipMax }
+			if v < 0 {
+				v = 0
+			}
+			if v > nnueV5ClipMax {
+				v = nnueV5ClipMax
+			}
 			sum += int64(v*v) * int64(outW[H+i])
 		}
 		output = sum/int64(nnueV5InputScale) + int64(net.OutputBias[bucket])
@@ -547,14 +573,22 @@ func (net *NNUENetV5) Forward(acc *NNUEAccumulatorV5, stm Color, pieceCount int)
 		output = int64(net.OutputBias[bucket])
 		for i := 0; i < H; i++ {
 			v := int32(stmAcc[i])
-			if v < 0 { v = 0 }
-			if v > nnueV5ClipMax { v = nnueV5ClipMax }
+			if v < 0 {
+				v = 0
+			}
+			if v > nnueV5ClipMax {
+				v = nnueV5ClipMax
+			}
 			output += int64(v) * int64(outW[i])
 		}
 		for i := 0; i < H; i++ {
 			v := int32(ntmAcc[i])
-			if v < 0 { v = 0 }
-			if v > nnueV5ClipMax { v = nnueV5ClipMax }
+			if v < 0 {
+				v = 0
+			}
+			if v > nnueV5ClipMax {
+				v = nnueV5ClipMax
+			}
 			output += int64(v) * int64(outW[H+i])
 		}
 	}
@@ -577,11 +611,12 @@ func (net *NNUENetV5) Forward(acc *NNUEAccumulatorV5, stm Color, pieceCount int)
 
 // forwardWithL1 computes the forward pass through the hidden layer.
 // Scale chain:
-//   acc values: scale QA (int16, [0, 255] after CReLU)
-//   L1 weights: scale QA
-//   L1 matmul result: scale QA² → divide by QA → scale QA → clamp [0, QA]
-//   Output weights: scale QB
-//   Output matmul: scale QA*QB → standard scaling
+//
+//	acc values: scale QA (int16, [0, 255] after CReLU)
+//	L1 weights: scale QA
+//	L1 matmul result: scale QA² → divide by QA → scale QA → clamp [0, QA]
+//	Output weights: scale QB
+//	Output matmul: scale QA*QB → standard scaling
 func (net *NNUENetV5) forwardWithL1(stmAcc, ntmAcc []int16, bucket int) int {
 	H := net.HiddenSize
 	L1 := net.L1Size
@@ -669,9 +704,10 @@ func (net *NNUENetV5) forwardWithL1(stmAcc, ntmAcc []int16, bucket int) int {
 // Applied at both accumulator→L1 and L1→output boundaries.
 //
 // Scale chain (identical to CReLU thanks to /QA after squaring):
-//   acc: scale QA → SCReLU(v²/QA): scale QA, range [0, QA]
-//   L1 matmul: scale QA² → /QA → scale QA → SCReLU(h²/QA): scale QA
-//   Output dot: scale QA*QB → standard scaling
+//
+//	acc: scale QA → SCReLU(v²/QA): scale QA, range [0, QA]
+//	L1 matmul: scale QA² → /QA → scale QA → SCReLU(h²/QA): scale QA
+//	Output dot: scale QA*QB → standard scaling
 func (net *NNUENetV5) forwardWithL1SCReLU(stmAcc, ntmAcc []int16, bucket, H, L1 int, hidden *[64]int32) int {
 	// SCReLU: clamp [0, QA] then square. No /QA before the matmul — keep full
 	// precision at scale QA². The matmul produces scale QA²·QA_L1.
@@ -725,9 +761,13 @@ func (net *NNUENetV5) forwardWithL1SCReLU(stmAcc, ntmAcc []int16, bucket, H, L1 
 		qaL1sq := float32(qaL1) * float32(qaL1)
 		for i := 0; i < L1; i++ {
 			h := hidden32[i] / qaInt // scale QA_L1
-			if h < 0 { h = 0 }
-			if h > int32(qaL1) { h = int32(qaL1) }
-			hsq := h * h // SCReLU → scale QA_L1²
+			if h < 0 {
+				h = 0
+			}
+			if h > int32(qaL1) {
+				h = int32(qaL1)
+			}
+			hsq := h * h                   // SCReLU → scale QA_L1²
 			l1f[i] = float32(hsq) / qaL1sq // → [0, 1]
 		}
 
@@ -1102,21 +1142,33 @@ func LoadNNUEV5(path string) (*NNUENetV5, error) {
 	}
 	defer f.Close()
 
-	// Get file size for hidden size inference
+	// Get file size for hidden size inference.
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat: %w", err)
 	}
-	fileSize := fi.Size()
+	return loadNNUEV5Reader(f, fi.Size())
+}
 
+// LoadNNUEV5FromBytes loads a v5/v6/v7 network directly from a byte slice.
+// It is used by the Android builds, which embed the production network in the
+// executable and should not need to extract a 25 MB temporary file at startup.
+func LoadNNUEV5FromBytes(data []byte) (*NNUENetV5, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty NNUE data")
+	}
+	return loadNNUEV5Reader(bytes.NewReader(data), int64(len(data)))
+}
+
+func loadNNUEV5Reader(r io.Reader, fileSize int64) (*NNUENetV5, error) {
 	var magic, version uint32
-	if err := binary.Read(f, binary.LittleEndian, &magic); err != nil {
+	if err := binary.Read(r, binary.LittleEndian, &magic); err != nil {
 		return nil, fmt.Errorf("reading magic: %w", err)
 	}
 	if magic != nnueMagic {
 		return nil, fmt.Errorf("invalid NNUE magic: 0x%X", magic)
 	}
-	if err := binary.Read(f, binary.LittleEndian, &version); err != nil {
+	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
 		return nil, fmt.Errorf("reading version: %w", err)
 	}
 
@@ -1127,7 +1179,7 @@ func LoadNNUEV5(path string) (*NNUENetV5, error) {
 		headerSize = 8 // magic + version
 	} else if version == 6 {
 		var flags uint8
-		if err := binary.Read(f, binary.LittleEndian, &flags); err != nil {
+		if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
 			return nil, fmt.Errorf("reading flags: %w", err)
 		}
 		net.UseSCReLU = flags&1 != 0
@@ -1136,16 +1188,16 @@ func LoadNNUEV5(path string) (*NNUENetV5, error) {
 	} else if version == nnueVersionV7 {
 		var flags uint8
 		var ftSize, l1Size, l2Size uint16
-		if err := binary.Read(f, binary.LittleEndian, &flags); err != nil {
+		if err := binary.Read(r, binary.LittleEndian, &flags); err != nil {
 			return nil, fmt.Errorf("reading flags: %w", err)
 		}
-		if err := binary.Read(f, binary.LittleEndian, &ftSize); err != nil {
+		if err := binary.Read(r, binary.LittleEndian, &ftSize); err != nil {
 			return nil, fmt.Errorf("reading ftSize: %w", err)
 		}
-		if err := binary.Read(f, binary.LittleEndian, &l1Size); err != nil {
+		if err := binary.Read(r, binary.LittleEndian, &l1Size); err != nil {
 			return nil, fmt.Errorf("reading l1Size: %w", err)
 		}
-		if err := binary.Read(f, binary.LittleEndian, &l2Size); err != nil {
+		if err := binary.Read(r, binary.LittleEndian, &l2Size); err != nil {
 			return nil, fmt.Errorf("reading l2Size: %w", err)
 		}
 		net.UseSCReLU = flags&1 != 0
@@ -1170,7 +1222,7 @@ func LoadNNUEV5(path string) (*NNUENetV5, error) {
 			return nil, fmt.Errorf("v7: hidden size %d is not a multiple of 256 (required for SIMD accumulator ops)", net.HiddenSize)
 		}
 
-		return readNNUEV5Body(f, net)
+		return readNNUEV5Body(r, net)
 	} else {
 		return nil, fmt.Errorf("expected v5, v6, or v7, got v%d", version)
 	}
@@ -1184,7 +1236,7 @@ func LoadNNUEV5(path string) (*NNUENetV5, error) {
 	}
 	net.HiddenSize = H
 
-	return readNNUEV5Body(f, net)
+	return readNNUEV5Body(r, net)
 }
 
 func readNNUEV5Body(f io.Reader, net *NNUENetV5) (*NNUENetV5, error) {

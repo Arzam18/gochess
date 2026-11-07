@@ -1,31 +1,42 @@
-# GoChess Android ARM64 build notes
+# Android ARM64 Build
 
-## Engine-only artifacts
+The GitHub Actions workflow produces two standalone Android ARM64 UCI executables:
 
-The workflow creates two separate downloadable artifacts. Each artifact contains exactly one file: the `gochess` Android executable.
+- `GoChess-Android-ARM64-NEON` — baseline ARM64 NEON (`GOARM64=v8.0`).
+- `GoChess-Android-ARM64-DotProd` — ARMv8.2-A DotProd (`GOARM64=v8.2`), with real SDOT kernels.
 
-- **NEON:** `GOARM64=v8.0`, baseline ARM64 Advanced SIMD.
-- **DotProd:** `GOARM64=v8.2`, the `gochess_dotprod` build tag, and NDK `-march=armv8.2-a+dotprod`. The executable is verified to contain actual `SDOT` instructions and requires a CPU that supports ARM DotProd.
+## Embedded production NNUE
 
-No NNUE network, `net.txt`, opening book, test executable, README, or build report is included in either download. This keeps the engine artifact to the executable only.
+Before compiling either variant, the workflow downloads the exact production network referenced by `net.txt`:
 
-**NNUE note:** GoChess loads its NNUE network separately. With only the executable present, it can start the UCI protocol but will run without NNUE until a compatible network is supplied through the UCI `NNUEFile` option (or placed beside the executable together with the matching `net.txt`). The network is not embedded in the binary. An opening book is likewise optional and is not bundled.
+`net-v5-120sb-sb120.nnue`
 
-Use the NEON executable on unknown or older ARM64 devices. The DotProd executable is appropriate for the Samsung Galaxy A16 5G, but should not be copied to a device without DotProd support.
+Source: `https://github.com/adamtwiss/gochess/releases/download/v0.5.0/net-v5-120sb-sb120.nnue`
 
-## SIMD implementation details
+The workflow checks the downloaded file's SHA-256, the production MD5 recorded in `models.md`, and minimum size, then compiles it into the executable with the `gochess_embed_net` build tag and Go's `embed` support. The NNUE is parsed directly from the embedded byte slice at startup; no temporary network file is extracted on Android.
 
-The original `nnue_arm64.s` remains the baseline-NEON implementation. In the DotProd variant, two int8 NNUE matrix kernels use ARMv8.2-A DotProd instructions:
+The two GitHub Actions artifacts each contain **exactly one file**, `gochess`. The executable includes the production NNUE internally, so a separate `.nnue` or `net.txt` file is not required. The opening book is not embedded and remains optional.
 
-1. `nnueMatMul32x512_i8DotProd` uses `SDOT` for CReLU inputs clamped to 0–127.
-2. `nnueV5L1Int8MatMulNDotProd` handles unsigned 0–255 SCReLU inputs using exact centering and correction before/after `SDOT`.
+External network files still take priority over the embedded production network when found beside the executable or in the current working directory. The UCI `NNUEFile` option continues to permit an explicit network override.
 
-The ordinary NEON implementations remain available as reference implementations. The default build uses NEON; the `gochess_dotprod` build tag selects the SDOT kernels. This is targeted DotProd acceleration, not a wholesale replacement of the entire NNUE backend.
+## Rebuilding locally
 
-## Android build and verification
+The source archive intentionally does not include the large release network. To create an embedded build manually:
 
-Both variants use `GOOS=android`, `GOARCH=arm64`, Android NDK r27c, API 24, and CGO enabled for Syzygy/Fathom support. The workflow runs host tests and a UCI protocol smoke test, cross-compiles both variants, verifies the AArch64 ELF interpreter `/system/bin/linker64`, and inspects the actual machine code. The DotProd job fails if no `SDOT` instruction is found; the baseline NEON job fails if `SDOT` is present.
+1. Download the official network to `assets/net-v5-120sb-sb120.nnue`.
+2. Verify its SHA-256 against `embeddedNNUEExpectedSHA256` in `nnue_embedded.go`.
+3. Build with `-tags gochess_embed_net` (and add `gochess_dotprod` for the DotProd variant).
 
-A device-runnable DotProd differential test binary is generated in the Actions runner's temporary directory for validation, but it is deliberately excluded from the downloadable engine artifact. The test executable is not uploaded.
+Without `gochess_embed_net`, the source retains its original external `net.txt` / `NNUEFile` network-loading behavior.
 
-A successful build and instruction check do not establish Android runtime correctness or playing strength. Test UCI, external NNUE loading, NPS, temperature, and MCEC results on the phone before marking GoChess successful.
+## Verification performed by Actions
+
+- Download and SHA-256 verification of the production NNUE.
+- Normal Go test suite and embedded-network test suite.
+- Host UCI handshake from an isolated working directory, verifying that the embedded network loads without external files.
+- Android AArch64 ELF and `/system/bin/linker64` checks.
+- NEON instruction verification in both binaries.
+- SDOT disassembly verification in the DotProd binary only.
+- Artifact check that `dist` contains only the `gochess` executable.
+
+Physical Android runtime, NPS and playing-strength verification are still required after downloading the artifacts.
