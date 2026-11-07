@@ -124,7 +124,9 @@ func (e *UCIEngine) SetNNUE(net *NNUENet) {
 			e.board.NNUEAcc = NewNNUEAccumulatorStack(512)
 		}
 		e.board.NNUENet.RecomputeAccumulator(e.board.NNUEAcc.Current(), &e.board)
-		e.send("info string SetNNUE fingerprint %s", net.Fingerprint())
+		// NNUE loading is performed before Run starts. Do not write to the UCI
+		// output here: the GUI has not sent "uci" yet, so even a valid info
+		// string would be unsolicited protocol output.
 	} else {
 		e.board.NNUEAcc = nil
 	}
@@ -142,7 +144,8 @@ func (e *UCIEngine) SetNNUEV5(net *NNUENetV5) {
 		net.RecomputeAccumulator(&e.board, e.board.NNUEAccV5.Current(), Black)
 		e.board.NNUEAccV5.Current().Computed = true
 		UseNNUE = true
-		e.send("info string SetNNUEV5 fingerprint %s", net.Fingerprint())
+		// Keep startup output silent until the GUI sends its first UCI command.
+		// The launcher reports NNUE loading diagnostics on stderr.
 	} else {
 		e.board.NNUEAccV5 = nil
 	}

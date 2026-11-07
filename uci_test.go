@@ -10,6 +10,58 @@ import (
 	"time"
 )
 
+func TestUCINNUEInitializationDoesNotWriteBeforeHandshake(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*UCIEngine)
+	}{
+		{
+			name: "v4 network",
+			setup: func(engine *UCIEngine) {
+				// A zero-filled network is sufficient to exercise accumulator
+				// initialization without depending on an external network file.
+				engine.SetNNUE(&NNUENet{})
+			},
+		},
+		{
+			name: "v5 network",
+			setup: func(engine *UCIEngine) {
+				const hiddenSize = 16 // SIMD accumulator width must be a multiple of 16.
+				net := &NNUENetV5{
+					HiddenSize:   hiddenSize,
+					InputWeights: make([]int16, NNUEInputSize*hiddenSize),
+					InputBiases:  make([]int16, hiddenSize),
+				}
+				engine.SetNNUEV5(net)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldUseNNUE := UseNNUE
+			defer func() { UseNNUE = oldUseNNUE }()
+
+			var out bytes.Buffer
+			engine := NewUCIEngineWithIO(strings.NewReader("uci\nisready\nquit\n"), &out)
+			tt.setup(engine)
+
+			if out.Len() != 0 {
+				t.Fatalf("NNUE initialization wrote unsolicited output before the UCI handshake: %q", out.String())
+			}
+
+			engine.Run()
+			lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+			if len(lines) < 3 || lines[0] != "id name GoChess" {
+				t.Fatalf("first UCI response must be the engine identity; got %q", out.String())
+			}
+			if lines[len(lines)-2] != "uciok" || lines[len(lines)-1] != "readyok" {
+				t.Fatalf("UCI handshake did not complete correctly: %q", out.String())
+			}
+		})
+	}
+}
+
 func TestParseGoParams(t *testing.T) {
 	tests := []struct {
 		name   string
