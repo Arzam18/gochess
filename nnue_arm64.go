@@ -29,7 +29,7 @@ func nnueCReLU256to8(src *int16, dst *byte)
 //go:noescape
 func nnueMatMul32x512(input *int16, weightsT *int16, biases *int32, output *int32)
 
-// nnueMatMul32x512_i8 computes the hidden layer matrix-vector multiply using int8 weights:
+// nnueMatMul32x512_i8NEON computes the baseline-NEON hidden layer int8 matrix-vector multiply:
 //
 //	output[j] = biases[j] + sum_i(input[i] * weightsT[j][i])
 //
@@ -37,7 +37,7 @@ func nnueMatMul32x512(input *int16, weightsT *int16, biases *int32, output *int3
 // Uses SMULL/SMLAL2 on .8B for 2× element throughput over int16.
 //
 //go:noescape
-func nnueMatMul32x512_i8(input *byte, weightsT *int8, biases *int32, output *int32)
+func nnueMatMul32x512_i8NEON(input *byte, weightsT *int8, biases *int32, output *int32)
 
 // nnueAccSubAdd256 computes acc[i] += newW[i] - oldW[i] for i=0..255.
 // Used for quiet moves (SubAddFeature).
@@ -167,11 +167,11 @@ func nnueInt8DotN(a *byte, b *int8, count int) int32
 //go:noescape
 func nnueSCReLUPack(src *int16, dst *byte, count int)
 
-// nnueV5L1Int8MatMulN computes L1 matmul with int8 weights (uint8 input × int8 weights).
+// nnueV5L1Int8MatMulNNEON computes the baseline-NEON L1 matmul (uint8 input × int8 weights).
 // accLen must be a multiple of 16.
 //
 //go:noescape
-func nnueV5L1Int8MatMulN(acc8 *byte, wT8 *int8, hidden *int32, accLen int, l1 int)
+func nnueV5L1Int8MatMulNNEON(acc8 *byte, wT8 *int8, hidden *int32, accLen int, l1 int)
 
 // nnueV5L1SCReLUMatMulN computes the SCReLU L1 hidden layer matmul for one perspective:
 //

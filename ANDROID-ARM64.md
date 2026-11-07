@@ -1,32 +1,43 @@
 # GoChess Android ARM64 build notes
 
-## ARM/NEON audit
+## Two separate Android builds
 
-GoChess already contains a genuine ARM64 NEON NNUE backend:
+The workflow produces two independent executables and artifacts:
 
-- `nnue_arm64.go` selects the ARM64 SIMD implementation (`nnueUseSIMD = true` and `nnueUseSIMDV5 = true`).
-- `nnue_arm64.s` contains the NEON accumulator, activation, and integer matrix/vector kernels.
-- The ARM64 source uses baseline Advanced SIMD instructions such as `SMAX`, `SMIN`, `SMULL`, `SMLAL`, `SADALP`, and `SQXTUN`.
-- No `SDOT`/`UDOT`, SVE, or other optional ARMv8.2+ vector instruction is required by this backend. ARM64 Android devices have the baseline Advanced SIMD/NEON support needed by these kernels.
+- **NEON:** `GOARM64=v8.0`, baseline ARM64 Advanced SIMD, intended for ordinary ARM64 Android devices.
+- **DotProd:** `GOARM64=v8.2` plus the `gochess_dotprod` build tag and NDK `-march=armv8.2-a+dotprod`. This executable contains actual `SDOT` instructions and requires a CPU that supports the ARM DotProd extension.
 
-The existing NEON kernels are retained. This build does not raise the whole binary's minimum CPU target to `armv8.2-a+dotprod`.
+Use the NEON executable on unknown or older ARM64 devices. The DotProd executable is suitable for the Samsung Galaxy A16 5G, whose ARM64-v8.2-A CPU supports DotProd, but should not be copied to a device without that feature.
 
-## Android-specific correction
+## SIMD implementation details
 
-The ARM64 NNUE code enabled `nnueUseSIMDV5`, but `nnueFloatMatVecFMA` was still implemented as a deliberate-crash assembly stub. The v5/v7 SCReLU float L2 path can call that function. The ARM64 version now implements the same scalar float32 matrix-vector loop as the generic Go fallback. This affects only that small float32 layer; the integer NNUE operations continue to use the existing NEON assembly.
+The original `nnue_arm64.s` remains the baseline-NEON reference. In the explicit DotProd variant, two int8 NNUE matrix kernels use additional ARMv8.2-A DotProd instructions:
 
-## Build target
+1. `nnueMatMul32x512_i8DotProd` uses `SDOT` directly. Its input comes from CReLU packing and is clamped to 0–127, so the input bytes are representable as signed int8 without changing their values.
+2. `nnueV5L1Int8MatMulNDotProd` handles the SCReLU-packed unsigned 0–255 input. It maps each byte `x` to signed `x-128`, performs `SDOT`, then adds the exact correction `128 * sum(weights)`. This preserves the original unsigned-input × signed-weight dot product, including inputs above 127.
 
-The workflow builds:
+The ordinary NEON implementations are retained under `nnueMatMul32x512_i8NEON` and `nnueV5L1Int8MatMulNNEON`. The `gochess_dotprod` build wrappers choose the new SDOT kernels; the default build wrappers continue to call the NEON reference functions.
 
-- `GOOS=android`
-- `GOARCH=arm64`
-- `GOARM64=v8.0`
+The remaining NNUE operations continue to use the existing NEON assembly. This is a targeted DotProd acceleration, not a wholesale AVX-512-equivalent ARM backend.
+
+## Android build configuration
+
+Both variants use:
+
+- `GOOS=android`, `GOARCH=arm64`
 - Android NDK r27c, API 24 Clang target
-- `CGO_ENABLED=1`, preserving the bundled Fathom/Syzygy tablebase support
+- `CGO_ENABLED=1`, retaining Fathom/Syzygy support
+- Android PIE executable linked against `/system/bin/linker64`
 
-The workflow runs the host Go tests, cross-compiles the Android executable, checks its AArch64 ELF header, verifies that NEON instructions appear in disassembly, and packages the executable with `net.txt`, the NNUE network referenced by `net.txt`, `book.bin`, and this readme.
+The workflow runs host Go tests, cross-compiles each variant, verifies the AArch64 Android ELF interpreter, and checks the generated machine code. The DotProd job fails unless `SDOT` is found in the actual executable disassembly. It also packages a device-runnable differential test binary that compares the DotProd matrix kernels against their retained NEON reference implementations.
 
-## Validation status
+## Device verification
 
-A successful GitHub Actions build verifies compilation and the presence of NEON instructions. It does not by itself verify UCI operation, NNUE correctness on a physical phone, NPS, heat behavior, or playing strength. Keep GoChess in **Testing** until the Android runtime and MCEC match checks are complete.
+For the DotProd artifact, run the included test executable on a DotProd-capable Android device:
+
+```sh
+chmod +x gochess-dotprod-kernel-tests
+./gochess-dotprod-kernel-tests -test.run 'TestDotProd'
+```
+
+Then run the engine through UCI and verify NNUE loading, search, NPS, temperature, and match strength. A successful compile and SDOT disassembly check do not establish playing strength. Keep GoChess in **Testing** until phone verification and MCEC matches are complete.

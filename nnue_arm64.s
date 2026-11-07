@@ -90,7 +90,7 @@ crelu8_loop:
 	RET
 
 // ============================================================================
-// nnueMatMul32x512_i8(input *byte, weightsT *int8, biases *int32, output *int32)
+// nnueMatMul32x512_i8NEON(input *byte, weightsT *int8, biases *int32, output *int32)
 //
 // Computes: output[j] = biases[j] + sum_i(input[i] * weightsT[j][i])
 // for j = 0..31, i = 0..511.
@@ -116,7 +116,7 @@ crelu8_loop:
 //   V24     = input data (16 bytes)
 //   V25     = weight data (16 bytes)
 // ============================================================================
-TEXT ·nnueMatMul32x512_i8(SB), NOSPLIT, $0-32
+TEXT ·nnueMatMul32x512_i8NEON(SB), NOSPLIT, $0-32
 	MOVD input+0(FP), R0
 	MOVD weightsT+8(FP), R1
 	MOVD biases+16(FP), R2
@@ -1480,13 +1480,13 @@ i8dot_neon_loop:
 	RET
 
 // ============================================================================
-// nnueV5L1Int8MatMulN(acc8 *byte, wT8 *int8, hidden *int32, accLen int, l1 int)
+// nnueV5L1Int8MatMulNNEON(acc8 *byte, wT8 *int8, hidden *int32, accLen int, l1 int)
 //
 // Int8 L1 matmul using NEON. Processes 16 bytes at a time.
 // Widens u8→i16, i8→i16, multiplies i16, accumulates i32.
 // accLen must be a multiple of 16.
 // ============================================================================
-TEXT ·nnueV5L1Int8MatMulN(SB), NOSPLIT, $0-40
+TEXT ·nnueV5L1Int8MatMulNNEON(SB), NOSPLIT, $0-40
 	MOVD acc8+0(FP), R0
 	MOVD wT8+8(FP), R1
 	MOVD hidden+16(FP), R2
