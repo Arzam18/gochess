@@ -2,6 +2,8 @@
 
 package chess
 
+import "unsafe"
+
 // NEON is always available on ARM64, no runtime detection needed.
 var nnueUseSIMD = true
 var nnueUseSIMDV5 = true
@@ -187,8 +189,23 @@ func nnueV5L1SCReLUMatMulN(acc *int16, wT *int16, hidden *int64, accLen int, l1 
 //go:nosplit
 func ttPrefetch(bucket *TTBucket)
 
-// nnueFloatMatVecFMA — not yet implemented for ARM64, Go fallback used.
-// Placeholder declaration to match interface; panics if called with nnueUseSIMD=true.
-//
-//go:noescape
-func nnueFloatMatVecFMA(dst *float32, input *float32, weights *float32, inputLen int, outputLen int)
+// nnueFloatMatVecFMA is the safe ARM64 fallback for the float32 L2 matrix-vector
+// multiply. The integer NNUE layers use the NEON assembly kernels above; this
+// small float32 layer uses the same scalar operation as the generic Go path.
+// Keeping this as a Go implementation avoids calling an unimplemented assembly
+// stub when an SCReLU network selects the v5/v7 SIMD path.
+func nnueFloatMatVecFMA(dst *float32, input *float32, weights *float32, inputLen int, outputLen int) {
+	dstValues := unsafe.Slice(dst, outputLen)
+	inputValues := unsafe.Slice(input, inputLen)
+	weightValues := unsafe.Slice(weights, inputLen*outputLen)
+	for i := 0; i < inputLen; i++ {
+		x := inputValues[i]
+		if x == 0 {
+			continue
+		}
+		weightOffset := i * outputLen
+		for k := 0; k < outputLen; k++ {
+			dstValues[k] += x * weightValues[weightOffset+k]
+		}
+	}
+}

@@ -1637,15 +1637,6 @@ l1screlu_neon_inner:
 
 	RET
 
-// ============================================================================
-// nnueFloatMatVecFMA — ARM64 stub (not yet optimized, falls back to Go scalar).
-// Go code checks nnueUseSIMDV5 before calling, but this stub exists for linkage.
-// ============================================================================
-TEXT ·nnueFloatMatVecFMA(SB), $0-40
-	MOVD $0, R0
-	MOVD R0, (R0)    // deliberate crash — should not be called
-	RET
-
 // ttPrefetch issues PRFM PLDL1KEEP for a TT bucket address.
 TEXT ·ttPrefetch(SB), NOSPLIT, $0-8
 	MOVD bucket+0(FP), R0
