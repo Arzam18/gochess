@@ -8,11 +8,20 @@ permissions:
 
 jobs:
   build:
-    name: GoChess Android ARM64 (NEON)
+    name: GoChess Android ARM64 (${{ matrix.variant }})
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: gochess-main
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: NEON
+            goarm64: v8.0
+            build_tags: ""
+            cgo_march: armv8-a
+          - variant: DotProd
+            goarm64: v8.2
+            build_tags: gochess_dotprod
+            cgo_march: armv8.2-a+dotprod
 
     steps:
       - name: Check out source
@@ -22,9 +31,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.5'
-          cache-dependency-path: gochess-main/go.sum
+          cache-dependency-path: go.sum
 
       - name: Run GoChess tests on host
+        if: matrix.variant == 'NEON'
         run: go test ./...
 
       - name: Set up Android NDK
@@ -34,9 +44,13 @@ jobs:
           ndk-version: r27c
           add-to-path: false
 
-      - name: Cross-compile Android ARM64 executable
+      - name: Cross-compile and verify Android ARM64
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          GOARM64_TARGET: ${{ matrix.goarm64 }}
+          GO_BUILD_TAGS: ${{ matrix.build_tags }}
+          CGO_MARCH: ${{ matrix.cgo_march }}
+          BUILD_VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -44,20 +58,40 @@ jobs:
 
           export GOOS=android
           export GOARCH=arm64
-          export GOARM64=v8.0
+          export GOARM64="$GOARM64_TARGET"
           export CGO_ENABLED=1
           export CC="$NDK_BIN/aarch64-linux-android24-clang"
-          export CGO_CFLAGS='-O3 -fPIC -march=armv8-a'
+          export CGO_CFLAGS="-O3 -fPIC -march=$CGO_MARCH"
 
           mkdir -p dist
-          go build -trimpath -ldflags='-s -w' -o dist/gochess ./cmd/chess
+          if [[ -n "$GO_BUILD_TAGS" ]]; then
+            go build -tags "$GO_BUILD_TAGS" -trimpath -ldflags='-s -w' -o dist/gochess ./cmd/chess
+          else
+            go build -trimpath -ldflags='-s -w' -o dist/gochess ./cmd/chess
+          fi
 
           "$NDK_BIN/llvm-readelf" -h dist/gochess > dist/elf-header.txt
           grep -q 'AArch64' dist/elf-header.txt
+          "$NDK_BIN/llvm-readelf" -l dist/gochess > dist/elf-program-headers.txt
+          grep -q '/system/bin/linker64' dist/elf-program-headers.txt
           "$NDK_BIN/llvm-objdump" -d dist/gochess > dist/gochess-disassembly.txt
+
           if ! grep -Eiq '\b(smax|smin|smlal|sadalp|sqxtun)\b' dist/gochess-disassembly.txt; then
-            echo 'Expected ARM64 NEON instructions were not found in the binary.' >&2
+            echo 'Expected baseline ARM64 NEON instructions were not found.' >&2
             exit 1
+          fi
+
+          DOTPROD_STATUS='not included in baseline NEON build'
+          if [[ "$BUILD_VARIANT" == 'DotProd' ]]; then
+            if ! grep -Eiq '[[:space:]]sdot[[:space:]]' dist/gochess-disassembly.txt; then
+              echo 'DotProd build requested, but no SDOT instruction was found in the executable.' >&2
+              exit 1
+            fi
+            DOTPROD_STATUS="verified: $(grep -Eic '[[:space:]]sdot[[:space:]]' dist/gochess-disassembly.txt) SDOT instruction(s) present"
+
+            # Build a device-runnable differential test binary. On the phone it
+            # compares the SDOT kernels with the retained NEON reference kernels.
+            go test -c -tags gochess_dotprod -trimpath -o dist/gochess-dotprod-kernel-tests .
           fi
 
           cp net.txt book.bin dist/
@@ -71,22 +105,34 @@ jobs:
           {
             echo 'Engine: GoChess'
             echo 'Target: Android ARM64 / AArch64'
-            echo 'Minimum API: 24'
-            echo 'Go architecture target: arm64 v8.0'
-            echo 'NNUE integer backend: baseline ARM64 NEON assembly'
-            echo 'DotProd: not required / not emitted by this backend'
-            echo 'Syzygy: included (CGO enabled; Fathom compiled with Android NDK)'
+            echo 'Minimum Android API: 24'
+            echo "Go architecture target: $GOARM64_TARGET"
+            echo "Build variant: $BUILD_VARIANT"
+            echo 'Baseline NNUE backend: ARM64 NEON assembly'
+            echo "DotProd verification: $DOTPROD_STATUS"
+            if [[ "$BUILD_VARIANT" == 'DotProd' ]]; then
+              echo 'DotProd kernels: nnueMatMul32x512_i8DotProd and nnueV5L1Int8MatMulNDotProd'
+              echo 'DotProd instruction: SDOT (ARMv8.2-A DotProd extension)'
+              echo 'Important: this executable requires a CPU with ARM DotProd support.'
+              echo 'A separate NEON-only executable is built for older ARM64 CPUs.'
+            fi
+            echo 'Syzygy: CGO enabled; Fathom is built with the Android NDK'
             echo "Go: $(go version)"
-            echo 'NEON disassembly check: passed'
+            echo 'Android ELF interpreter: /system/bin/linker64'
           } > dist/build-report.txt
 
-          rm -f dist/elf-header.txt dist/gochess-disassembly.txt
-          (cd dist && zip -9 -q ../GoChess-Android-ARM64.zip gochess net.txt "$NET_NAME" book.bin README.txt build-report.txt)
+          rm -f dist/elf-header.txt dist/elf-program-headers.txt dist/gochess-disassembly.txt
+          PACKAGE="GoChess-Android-ARM64-${BUILD_VARIANT}.zip"
+          FILES=(gochess net.txt "$NET_NAME" book.bin README.txt build-report.txt)
+          if [[ -f dist/gochess-dotprod-kernel-tests ]]; then
+            FILES+=(gochess-dotprod-kernel-tests)
+          fi
+          (cd dist && zip -9 -q "../$PACKAGE" "${FILES[@]}")
 
       - name: Upload GoChess Android ARM64 package
         uses: actions/upload-artifact@v4
         with:
-          name: GoChess-Android-ARM64
-          path: gochess-main/GoChess-Android-ARM64.zip
+          name: GoChess-Android-ARM64-${{ matrix.variant }}
+          path: GoChess-Android-ARM64-${{ matrix.variant }}.zip
           if-no-files-found: error
           retention-days: 30
