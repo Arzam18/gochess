@@ -33,9 +33,24 @@ jobs:
           go-version: '1.25.5'
           cache-dependency-path: go.sum
 
-      - name: Run GoChess tests on host
+      - name: Run GoChess tests and UCI protocol smoke test on host
         if: matrix.variant == 'NEON'
-        run: go test ./...
+        run: |
+          set -euo pipefail
+          go test ./...
+
+          # The host smoke test has no external NNUE/book files. It verifies
+          # that startup emits no unsolicited text and responds to UCI normally.
+          HOST_ENGINE="$RUNNER_TEMP/gochess-uci-smoke"
+          UCI_OUTPUT="$RUNNER_TEMP/gochess-uci-output.txt"
+          go build -trimpath -o "$HOST_ENGINE" ./cmd/chess
+          printf 'uci\nisready\nquit\n' | "$HOST_ENGINE" > "$UCI_OUTPUT" 2> "$RUNNER_TEMP/gochess-uci-stderr.txt"
+          FIRST_LINE="$(sed -n '1p' "$UCI_OUTPUT")"
+          grep -Fxq 'id name GoChess' "$UCI_OUTPUT"
+          grep -Fxq 'uciok' "$UCI_OUTPUT"
+          grep -Fxq 'readyok' "$UCI_OUTPUT"
+          test "$FIRST_LINE" = 'id name GoChess'
+          echo 'UCI protocol smoke test passed: no output before id name / uci handshake.'
 
       - name: Set up Android NDK
         id: setup-ndk
@@ -63,76 +78,55 @@ jobs:
           export CC="$NDK_BIN/aarch64-linux-android24-clang"
           export CGO_CFLAGS="-O3 -fPIC -march=$CGO_MARCH"
 
+          rm -rf dist
           mkdir -p dist
           if [[ -n "$GO_BUILD_TAGS" ]]; then
             go build -tags "$GO_BUILD_TAGS" -trimpath -ldflags='-s -w' -o dist/gochess ./cmd/chess
           else
             go build -trimpath -ldflags='-s -w' -o dist/gochess ./cmd/chess
           fi
+          chmod 755 dist/gochess
 
-          "$NDK_BIN/llvm-readelf" -h dist/gochess > dist/elf-header.txt
-          grep -q 'AArch64' dist/elf-header.txt
-          "$NDK_BIN/llvm-readelf" -l dist/gochess > dist/elf-program-headers.txt
-          grep -q '/system/bin/linker64' dist/elf-program-headers.txt
-          "$NDK_BIN/llvm-objdump" -d dist/gochess > dist/gochess-disassembly.txt
+          # Keep verification files outside dist so the downloadable artifact
+          # contains exactly one file: the engine executable.
+          "$NDK_BIN/llvm-readelf" -h dist/gochess > "$RUNNER_TEMP/elf-header-$BUILD_VARIANT.txt"
+          grep -q 'AArch64' "$RUNNER_TEMP/elf-header-$BUILD_VARIANT.txt"
+          "$NDK_BIN/llvm-readelf" -l dist/gochess > "$RUNNER_TEMP/elf-program-headers-$BUILD_VARIANT.txt"
+          grep -q '/system/bin/linker64' "$RUNNER_TEMP/elf-program-headers-$BUILD_VARIANT.txt"
+          "$NDK_BIN/llvm-objdump" -d dist/gochess > "$RUNNER_TEMP/gochess-$BUILD_VARIANT-disassembly.txt"
 
-          if ! grep -Eiq '\b(smax|smin|smlal|sadalp|sqxtun)\b' dist/gochess-disassembly.txt; then
+          if ! grep -Eiq '\b(smax|smin|smlal|sadalp|sqxtun)\b' "$RUNNER_TEMP/gochess-$BUILD_VARIANT-disassembly.txt"; then
             echo 'Expected baseline ARM64 NEON instructions were not found.' >&2
             exit 1
           fi
 
-          DOTPROD_STATUS='not included in baseline NEON build'
           if [[ "$BUILD_VARIANT" == 'DotProd' ]]; then
-            if ! grep -Eiq '[[:space:]]sdot[[:space:]]' dist/gochess-disassembly.txt; then
+            if ! grep -Eiq '[[:space:]]sdot[[:space:]]' "$RUNNER_TEMP/gochess-$BUILD_VARIANT-disassembly.txt"; then
               echo 'DotProd build requested, but no SDOT instruction was found in the executable.' >&2
               exit 1
             fi
-            DOTPROD_STATUS="verified: $(grep -Eic '[[:space:]]sdot[[:space:]]' dist/gochess-disassembly.txt) SDOT instruction(s) present"
+            echo "DotProd verified: $(grep -Eic '[[:space:]]sdot[[:space:]]' "$RUNNER_TEMP/gochess-$BUILD_VARIANT-disassembly.txt") SDOT instruction(s) present."
 
-            # Build a device-runnable differential test binary. On the phone it
-            # compares the SDOT kernels with the retained NEON reference kernels.
-            go test -c -tags gochess_dotprod -trimpath -o dist/gochess-dotprod-kernel-tests .
-          fi
-
-          cp net.txt book.bin dist/
-          NET_URL="$(tr -d '\r\n' < net.txt)"
-          NET_NAME="${NET_URL##*/}"
-          test -n "$NET_NAME"
-          curl --fail --location --retry 3 "$NET_URL" --output "dist/$NET_NAME"
-          test -s "dist/$NET_NAME"
-          cp ANDROID-ARM64.md dist/README.txt
-
-          {
-            echo 'Engine: GoChess'
-            echo 'Target: Android ARM64 / AArch64'
-            echo 'Minimum Android API: 24'
-            echo "Go architecture target: $GOARM64_TARGET"
-            echo "Build variant: $BUILD_VARIANT"
-            echo 'Baseline NNUE backend: ARM64 NEON assembly'
-            echo "DotProd verification: $DOTPROD_STATUS"
-            if [[ "$BUILD_VARIANT" == 'DotProd' ]]; then
-              echo 'DotProd kernels: nnueMatMul32x512_i8DotProd and nnueV5L1Int8MatMulNDotProd'
-              echo 'DotProd instruction: SDOT (ARMv8.2-A DotProd extension)'
-              echo 'Important: this executable requires a CPU with ARM DotProd support.'
-              echo 'A separate NEON-only executable is built for older ARM64 CPUs.'
+            # Build a device-runnable differential test outside dist. This is
+            # for validation only and must never be included with the engine.
+            go test -c -tags gochess_dotprod -trimpath -o "$RUNNER_TEMP/gochess-dotprod-kernel-tests" .
+          else
+            if grep -Eiq '[[:space:]]sdot[[:space:]]' "$RUNNER_TEMP/gochess-$BUILD_VARIANT-disassembly.txt"; then
+              echo 'Unexpected SDOT instruction found in baseline NEON build.' >&2
+              exit 1
             fi
-            echo 'Syzygy: CGO enabled; Fathom is built with the Android NDK'
-            echo "Go: $(go version)"
-            echo 'Android ELF interpreter: /system/bin/linker64'
-          } > dist/build-report.txt
-
-          rm -f dist/elf-header.txt dist/elf-program-headers.txt dist/gochess-disassembly.txt
-          PACKAGE="GoChess-Android-ARM64-${BUILD_VARIANT}.zip"
-          FILES=(gochess net.txt "$NET_NAME" book.bin README.txt build-report.txt)
-          if [[ -f dist/gochess-dotprod-kernel-tests ]]; then
-            FILES+=(gochess-dotprod-kernel-tests)
+            echo 'Baseline NEON verified: no SDOT instructions found.'
           fi
-          (cd dist && zip -9 -q "../$PACKAGE" "${FILES[@]}")
 
-      - name: Upload GoChess Android ARM64 package
+          test -f dist/gochess
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 1
+          echo 'Engine-only artifact check passed: dist contains exactly gochess.'
+
+      - name: Upload engine-only artifact
         uses: actions/upload-artifact@v4
         with:
           name: GoChess-Android-ARM64-${{ matrix.variant }}
-          path: GoChess-Android-ARM64-${{ matrix.variant }}.zip
+          path: dist/gochess
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
