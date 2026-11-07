@@ -2,7 +2,7 @@
 
 package chess
 
-import "embed"
+import _ "embed"
 
 // The workflow downloads and verifies this asset before compiling the two
 // Android engine variants. The binary is therefore self-contained at runtime.
