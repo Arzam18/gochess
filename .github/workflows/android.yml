@@ -16,16 +16,44 @@ jobs:
         include:
           - variant: NEON
             goarm64: v8.0
-            build_tags: ""
+            build_tags: gochess_embed_net
             cgo_march: armv8-a
           - variant: DotProd
             goarm64: v8.2
-            build_tags: gochess_dotprod
+            build_tags: gochess_dotprod,gochess_embed_net
             cgo_march: armv8.2-a+dotprod
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Download and verify the official production NNUE
+        id: production-nnue
+        env:
+          EXPECTED_NNUE_URL: https://github.com/adamtwiss/gochess/releases/download/v0.5.0/net-v5-120sb-sb120.nnue
+          NNUE_SHA256: be22a20bfde78d7915cc0cc5fe84e917a76d5df130b9555884a570a04b3ab2fc
+          NNUE_MD5: 4a58e81ac236f4f63e7ffecc7c0a2ddc
+        run: |
+          set -euo pipefail
+          NNUE_URL="$(tr -d '\r\n' < net.txt)"
+          if [[ "$NNUE_URL" != "$EXPECTED_NNUE_URL" ]]; then
+            echo "net.txt changed to an unverified network URL: $NNUE_URL" >&2
+            echo 'Update the expected URL and both checksums before building.' >&2
+            exit 1
+          fi
+          mkdir -p assets
+          NNUE_FILENAME="${NNUE_URL##*/}"
+          NNUE_FILE="assets/$NNUE_FILENAME"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 "$NNUE_URL" --output "$NNUE_FILE"
+          SIZE="$(stat -c '%s' "$NNUE_FILE")"
+          if [[ "$SIZE" -lt 20000000 ]]; then
+            echo "Downloaded NNUE is unexpectedly small: $SIZE bytes" >&2
+            exit 1
+          fi
+          printf '%s  %s\n' "$NNUE_SHA256" "$NNUE_FILE" | sha256sum --check --strict
+          printf '%s  %s\n' "$NNUE_MD5" "$NNUE_FILE" | md5sum --check --strict
+          echo "Verified official production NNUE: $SIZE bytes"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -33,24 +61,30 @@ jobs:
           go-version: '1.25.5'
           cache-dependency-path: go.sum
 
-      - name: Run GoChess tests and UCI protocol smoke test on host
+      - name: Run GoChess tests and embedded-NNUE UCI smoke test on host
         if: matrix.variant == 'NEON'
         run: |
           set -euo pipefail
           go test ./...
+          go test -tags gochess_embed_net ./...
 
-          # The host smoke test has no external NNUE/book files. It verifies
-          # that startup emits no unsolicited text and responds to UCI normally.
+          # Build a host test executable with the same embedded production net.
           HOST_ENGINE="$RUNNER_TEMP/gochess-uci-smoke"
+          UCI_DIR="$RUNNER_TEMP/gochess-uci-isolated"
+          mkdir -p "$UCI_DIR"
+          go build -tags gochess_embed_net -trimpath -o "$HOST_ENGINE" ./cmd/chess
+          (
+            cd "$UCI_DIR"
+            printf 'uci\nisready\nquit\n' | "$HOST_ENGINE" > "$RUNNER_TEMP/gochess-uci-output.txt" 2> "$RUNNER_TEMP/gochess-uci-stderr.txt"
+          )
           UCI_OUTPUT="$RUNNER_TEMP/gochess-uci-output.txt"
-          go build -trimpath -o "$HOST_ENGINE" ./cmd/chess
-          printf 'uci\nisready\nquit\n' | "$HOST_ENGINE" > "$UCI_OUTPUT" 2> "$RUNNER_TEMP/gochess-uci-stderr.txt"
           FIRST_LINE="$(sed -n '1p' "$UCI_OUTPUT")"
           grep -Fxq 'id name GoChess' "$UCI_OUTPUT"
           grep -Fxq 'uciok' "$UCI_OUTPUT"
           grep -Fxq 'readyok' "$UCI_OUTPUT"
           test "$FIRST_LINE" = 'id name GoChess'
-          echo 'UCI protocol smoke test passed: no output before id name / uci handshake.'
+          grep -Fq 'NNUE v5 loaded from embedded:net-v5-120sb-sb120.nnue' "$RUNNER_TEMP/gochess-uci-stderr.txt"
+          echo 'UCI smoke test passed: embedded NNUE loaded and UCI handshake completed.'
 
       - name: Set up Android NDK
         id: setup-ndk
@@ -66,6 +100,7 @@ jobs:
           GO_BUILD_TAGS: ${{ matrix.build_tags }}
           CGO_MARCH: ${{ matrix.cgo_march }}
           BUILD_VARIANT: ${{ matrix.variant }}
+          NNUE_SIZE: ${{ steps.production-nnue.outputs.size }}
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -86,6 +121,12 @@ jobs:
             go build -trimpath -ldflags='-s -w' -o dist/gochess ./cmd/chess
           fi
           chmod 755 dist/gochess
+          BINARY_SIZE="$(stat -c '%s' dist/gochess)"
+          if [[ "$BINARY_SIZE" -le "$NNUE_SIZE" ]]; then
+            echo "Android executable ($BINARY_SIZE bytes) does not appear to contain the $NNUE_SIZE-byte embedded NNUE." >&2
+            exit 1
+          fi
+          echo "Embedded NNUE size check passed: executable=$BINARY_SIZE bytes, network=$NNUE_SIZE bytes."
 
           # Keep verification files outside dist so the downloadable artifact
           # contains exactly one file: the engine executable.
@@ -109,7 +150,7 @@ jobs:
 
             # Build a device-runnable differential test outside dist. This is
             # for validation only and must never be included with the engine.
-            go test -c -tags gochess_dotprod -trimpath -o "$RUNNER_TEMP/gochess-dotprod-kernel-tests" .
+            go test -c -tags gochess_dotprod,gochess_embed_net -trimpath -o "$RUNNER_TEMP/gochess-dotprod-kernel-tests" .
           else
             if grep -Eiq '[[:space:]]sdot[[:space:]]' "$RUNNER_TEMP/gochess-$BUILD_VARIANT-disassembly.txt"; then
               echo 'Unexpected SDOT instruction found in baseline NEON build.' >&2
